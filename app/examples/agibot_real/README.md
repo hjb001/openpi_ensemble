@@ -29,8 +29,11 @@ frames + joint state into the schema the server's `Go2ACOTInputs` /
 ```bash
 python scripts/serve_policy.py --env=g2sim \
     policy:checkpoint --policy.config=acot_icra_simulation_challenge_reasoning_to_action \
-                      --policy.dir=./checkpoints/h3-continues-10000
+                      --policy.dir=./sim_real_action
 ```
+
+(or simply `python scripts/serve_policy.py --env=g2sim`, since `./sim_real_action`
+is the new default checkpoint dir for `EnvMode.G2SIM`.)
 
 ## Client side
 

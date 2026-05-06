@@ -161,7 +161,7 @@ DEFAULT_CHECKPOINT: dict[EnvMode, Checkpoint] = {
     ),
     EnvMode.G2SIM: Checkpoint(
         config="acot_icra_simulation_challenge_reasoning_to_action",
-        dir="./checkpoints/h3-continues-10000",
+        dir="./sim_real_action",
     ),
 }
 

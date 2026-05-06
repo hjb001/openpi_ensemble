@@ -19,7 +19,7 @@ agibot_real/main.py
 
 Server entry: `EnvMode.G2SIM`, training config
 `acot_icra_simulation_challenge_reasoning_to_action`, ckpt
-`./checkpoints/h3-continues-10000`. Server-side data class
+`./sim_real_action` (i.e. `app/sim_real_action`). Server-side data class
 `LerobotACOTGo2DataConfig` already expects exactly the schema below.
 
 ## 2. Interface contract
