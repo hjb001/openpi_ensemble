@@ -74,10 +74,28 @@ python scripts/serve_policy.py --env=g2sim --port=8000 \
 
 
 # ============================================================
+# 4b. CLIENT-ONLY ENV — REQUIRED before sections 5/6/7/8 (every shell)
+# ============================================================
+# Sections 5–8 import agibot_gdk. The wheel installs into the GDK cache,
+# not standard site-packages, so every fresh shell needs:
+source ~/.cache/agibot/app/env.sh
+
+# Python version note: GDK ships a wheel built against Python 3.10. If your
+# active env is a different version (e.g. conda with 3.11) you must rebuild
+# the wheel for that interpreter:
+#   cd ~/.cache/agibot/app/gdk/build_dep/python/pybind/
+#   pip install . --no-build-isolation
+#
+# NOT needed for: section 1 (unit tests use a fake gdk) and section 4
+# (the policy server has nothing to do with GDK).
+
+
+# ============================================================
 # 5. CLIENT — DRY-RUN (connects to GDK + server, but does NOT move robot)
 # ============================================================
 # Always run this first after any code change. Watch the logs for ~30 s,
 # Ctrl+C to exit. Replace <server_ip> with where serve_policy.py runs.
+source ~/.cache/agibot/app/env.sh        # if not already sourced this shell
 cd /path/to/openpi_ensemble/app
 python -m examples.agibot_real.main \
     --host=<server_ip> --port=8000 \
@@ -91,6 +109,7 @@ python -m examples.agibot_real.main \
 # Keep an emergency stop in reach. --speed-scale=0.3 attenuates each step's
 # delta-from-current to 30%; --reset-pose is 16 floats:
 #   ARM_L_JOINT1..7, ARM_R_JOINT1..7, GRIPPER_L, GRIPPER_R   (radians)
+source ~/.cache/agibot/app/env.sh        # if not already sourced this shell
 cd /path/to/openpi_ensemble/app
 python -m examples.agibot_real.main \
     --host=<server_ip> --port=8000 \
@@ -105,6 +124,7 @@ python -m examples.agibot_real.main \
 # 7. CLIENT — REAL ROBOT, normal speed
 # ============================================================
 # Only after step 6 ran cleanly. Bump speed-scale gradually.
+source ~/.cache/agibot/app/env.sh        # if not already sourced this shell
 cd /path/to/openpi_ensemble/app
 python -m examples.agibot_real.main \
     --host=<server_ip> --port=8000 \
@@ -116,6 +136,7 @@ python -m examples.agibot_real.main \
 # ============================================================
 # 8. DEBUG — read joint positions without server / without client
 # ============================================================
+source ~/.cache/agibot/app/env.sh        # if not already sourced this shell
 python - <<'PY'
 import agibot_gdk, time
 agibot_gdk.gdk_init()
