@@ -1,0 +1,162 @@
+################################################################################
+# Agibot G02 real-robot client — copy/paste run commands
+#
+# Branch:  feat/agibot-real-client
+# Server:  reuses serve_policy.py --env=g2sim (no server-side change)
+# Client:  examples/agibot_real/  (this package)
+#
+# Order of execution: pick the section you need; sections run independently
+# except where noted.
+################################################################################
+
+
+# ============================================================
+# 0. ONE-TIME — clone the repo on the dev/robot machine
+# ============================================================
+git clone -b feat/agibot-real-client git@github.com:hjb001/openpi_ensemble.git
+cd openpi_ensemble/app
+pip install -e packages/openpi-client
+pip install -r examples/agibot_real/requirements.in
+
+
+# ============================================================
+# 1. UNIT TESTS — no robot, no server, ~15 s
+# ============================================================
+cd /path/to/openpi_ensemble/app
+python -m pytest examples/agibot_real/tests -v
+# expect: 25 passed
+
+
+# ============================================================
+# 2. ONE-TIME — install agibot_gdk on the robot dev machine
+# ============================================================
+# Requires the dev machine on the same LAN as the robot:
+#   robot IP: 10.42.1.101
+#   dev   IP: 10.42.1.102 (set static)
+ping 10.42.1.101                                    # must succeed first
+
+curl -sSL http://10.42.1.101:8849/install.sh | bash
+sudo apt install -y libprotobuf-dev protobuf-compiler
+
+cd ~/.cache/agibot/app/gdk/build_dep/python/pybind/
+pip install . --no-build-isolation
+
+source ~/.cache/agibot/app/env.sh                    # adds agibot_gdk to PATH
+
+python -c "import agibot_gdk; print(agibot_gdk.__file__)"   # smoke test
+
+
+# ============================================================
+# 3. ONE-TIME — verify STATE_LAYOUT matches the training data
+# ============================================================
+# Pick any of the training repo_id from the train config; example below:
+cd /path/to/openpi_ensemble/app
+python -m examples.agibot_real.dump_state_layout \
+    --repo-id /mnt/public/E6/lerobot/8169/2026021101/gripper/task_6167
+# If the printed joint order differs from
+# examples/agibot_real/constants.py:STATE_LAYOUT, edit the constant before
+# running anything on the real robot.
+
+
+# ============================================================
+# 4. SERVER — start the policy server (any GPU box)
+# ============================================================
+# Place the trained checkpoint at app/sim_real_action/ (must contain
+# _CHECKPOINT_METADATA and params/), then:
+cd /path/to/openpi_ensemble/app
+python scripts/serve_policy.py --env=g2sim --port=8000
+
+# Equivalent explicit form:
+python scripts/serve_policy.py --env=g2sim --port=8000 \
+    policy:checkpoint \
+    --policy.config=acot_icra_simulation_challenge_reasoning_to_action \
+    --policy.dir=./sim_real_action
+
+
+# ============================================================
+# 5. CLIENT — DRY-RUN (connects to GDK + server, but does NOT move robot)
+# ============================================================
+# Always run this first after any code change. Watch the logs for ~30 s,
+# Ctrl+C to exit. Replace <server_ip> with where serve_policy.py runs.
+cd /path/to/openpi_ensemble/app
+python -m examples.agibot_real.main \
+    --host=<server_ip> --port=8000 \
+    --prompt="Pour the workpiece into the box" \
+    --dry-run
+
+
+# ============================================================
+# 6. CLIENT — REAL ROBOT, low speed (FIRST live run)
+# ============================================================
+# Keep an emergency stop in reach. --speed-scale=0.3 attenuates each step's
+# delta-from-current to 30%; --reset-pose is 16 floats:
+#   ARM_L_JOINT1..7, ARM_R_JOINT1..7, GRIPPER_L, GRIPPER_R   (radians)
+cd /path/to/openpi_ensemble/app
+python -m examples.agibot_real.main \
+    --host=<server_ip> --port=8000 \
+    --prompt="Pour the workpiece into the box" \
+    --speed-scale=0.3 \
+    --reset-pose 0.0 0.0 0.0 0.0 0.0 0.0 0.0 \
+                 0.0 0.0 0.0 0.0 0.0 0.0 0.0 \
+                 0.0 0.0
+
+
+# ============================================================
+# 7. CLIENT — REAL ROBOT, normal speed
+# ============================================================
+# Only after step 6 ran cleanly. Bump speed-scale gradually.
+cd /path/to/openpi_ensemble/app
+python -m examples.agibot_real.main \
+    --host=<server_ip> --port=8000 \
+    --prompt="Pour the workpiece into the box" \
+    --speed-scale=0.5
+# ... once stable, remove --speed-scale (defaults to 1.0)
+
+
+# ============================================================
+# 8. DEBUG — read joint positions without server / without client
+# ============================================================
+python - <<'PY'
+import agibot_gdk, time
+agibot_gdk.gdk_init()
+r = agibot_gdk.Robot()
+time.sleep(2)
+for s in r.get_joint_states()['states']:
+    print(f"{s['name']}: {s['motor_position']:.3f}")
+agibot_gdk.gdk_release()
+PY
+
+
+# ============================================================
+# 9. DEBUG — show full CLI options
+# ============================================================
+python -m examples.agibot_real.main --help
+
+
+# ============================================================
+# 10. DOCKER (optional) — package the client
+# ============================================================
+# Build (provide path to the agibot_gdk wheel built in section 2):
+cd /path/to/openpi_ensemble/app
+docker build -f examples/agibot_real/Dockerfile \
+    --build-arg AGIBOT_GDK_WHEEL=path/to/agibot_gdk-x.y.z.whl \
+    -t openpi/agibot_real .
+
+# Run (host network so the container can reach 10.42.1.101):
+docker run --rm --net=host \
+    -v ~/.cache/agibot:/root/.cache/agibot:ro \
+    openpi/agibot_real \
+    --host=<server_ip> --port=8000 \
+    --prompt="Pour the workpiece into the box" \
+    --dry-run
+
+
+# ============================================================
+# CHECKLIST BEFORE FIRST LIVE RUN
+# ============================================================
+# [ ] section 1 unit tests all green
+# [ ] section 3 dump_state_layout printed an order that matches STATE_LAYOUT
+# [ ] section 5 dry-run ran 30 s without errors
+# [ ] e-stop reachable; surrounding workspace clear
+# [ ] reset_pose values are within JOINT_LIMITS in constants.py
+# [ ] section 6 with --speed-scale=0.3 looks calm (no jerks, no oscillation)
