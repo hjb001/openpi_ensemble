@@ -1,0 +1,8 @@
+numpy>=1.22
+einops>=0.8
+pillow>=10
+typing-extensions>=4.12
+tyro>=0.9
+# openpi-client lives in the workspace; install with `pip install -e packages/openpi-client`.
+# agibot_gdk is shipped via the GDK install script (10.42.1.101:8849); install it separately
+# from `~/.cache/agibot/app/gdk/build_dep/python/pybind/`.
