@@ -1,0 +1,56 @@
+# Task-routed ensemble：启动时加载全部 checkpoint 到 GPU，无运行时切换。
+# routes.json 中 2 个唯一 checkpoint（acot_sorting_packages_30000 + h3-continues-10000），
+# 启动后常驻 GPU，零延迟路由。
+#
+# 构建：
+#   cd /data/openpi_app_ensemble/app
+#   docker build -f Dockerfile.ensemble-2ckpt -t openpi-g2sim:ensemble-2ckpt .
+# 运行：
+#   docker run --gpus all -p 8999:8999 openpi-g2sim:ensemble-2ckpt
+FROM nvidia/cuda:12.3.2-cudnn9-runtime-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    UV_LINK_MODE=copy \
+    UV_PROJECT_ENVIRONMENT=/app/.venv \
+    OPENPI_DATA_HOME=/app/.cache/openpi \
+    XLA_FLAGS=--xla_gpu_enable_triton_gemm=false \
+    MPLBACKEND=Agg
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    software-properties-common \
+    && add-apt-repository -y ppa:deadsnakes/ppa \
+    && apt-get update && apt-get install -y --no-install-recommends \
+    python3.11 \
+    python3.11-dev \
+    python3.11-venv \
+    curl \
+    ca-certificates \
+    git \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN ln -sf /usr/bin/python3.11 /usr/local/bin/python \
+    && ln -sf /usr/bin/python3.11 /usr/local/bin/python3
+
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+
+WORKDIR /app
+
+COPY . .
+
+RUN mkdir -p /app/.cache/openpi \
+    && uv sync --frozen --no-dev \
+    && uv pip install "matplotlib>=3.10.0"
+
+EXPOSE 8999
+
+CMD [ \
+    "/app/.venv/bin/python", \
+    "scripts/serve_policy.py", \
+    "--env", "G2SIM", \
+    "--port", "8999", \
+    "policy:task-routed-ensemble", \
+    "--policy.routes-json", "./routes.json", \
+    "--policy.default.config", "acot_icra_simulation_challenge_reasoning_to_action", \
+    "--policy.default.dir", "./checkpoints/h3-24999-v2" \
+]

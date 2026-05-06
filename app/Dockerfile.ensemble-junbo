@@ -1,0 +1,53 @@
+# 赛方要求：容器内推理监听 8999；docker run 无需再跟命令（用 CMD 自启动）。
+# Task-routed ensemble：按 checkpoints/routes.json 路由任务；默认回退到 h3-continues-10000。
+# 构建上下文必须是本目录（含 checkpoints、uv.lock、packages 等）：
+#   cd /data/openpi_app_yifei/app
+#   docker build -f Dockerfile.ensemble -t openpi-g2sim:ensemble .
+FROM nvidia/cuda:12.3.2-cudnn9-runtime-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    UV_LINK_MODE=copy \
+    UV_PROJECT_ENVIRONMENT=/app/.venv \
+    OPENPI_DATA_HOME=/app/.cache/openpi \
+    XLA_FLAGS=--xla_gpu_enable_triton_gemm=false \
+    MPLBACKEND=Agg
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    software-properties-common \
+    && add-apt-repository -y ppa:deadsnakes/ppa \
+    && apt-get update && apt-get install -y --no-install-recommends \
+    python3.11 \
+    python3.11-dev \
+    python3.11-venv \
+    curl \
+    ca-certificates \
+    git \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN ln -sf /usr/bin/python3.11 /usr/local/bin/python \
+    && ln -sf /usr/bin/python3.11 /usr/local/bin/python3
+
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+
+WORKDIR /app
+
+COPY . .
+
+RUN mkdir -p /app/.cache/openpi \
+    && uv sync --frozen --no-dev \
+    && uv pip install "matplotlib>=3.10.0"
+
+EXPOSE 8999
+
+# 与本地：uv run scripts/serve_policy.py ... policy:task-routed-ensemble ... 等价；镜像内直接用 venv python。
+CMD [ \
+    "/app/.venv/bin/python", \
+    "scripts/serve_policy.py", \
+    "--env", "G2SIM", \
+    "--port", "8999", \
+    "policy:task-routed-ensemble", \
+    "--policy.routes-json", "./checkpoints/routes_junbo.json", \
+    "--policy.default.config", "acot_icra_simulation_challenge_reasoning_to_action", \
+    "--policy.default.dir", "./checkpoints/h3-continue-66666" \
+]

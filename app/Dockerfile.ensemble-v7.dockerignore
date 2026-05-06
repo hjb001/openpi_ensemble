@@ -1,0 +1,20 @@
+# Dockerfile.ensemble-v7 专用 ignore（需要 BuildKit）
+# Ignore all checkpoints by default.
+checkpoints/**
+# Re-include the two checkpoints we need (per routes.json).
+!checkpoints/
+!checkpoints/sorting_clean_5000_new/
+!checkpoints/sorting_clean_5000_new/**
+!checkpoints/roll_v3_47999/
+!checkpoints/roll_v3_47999/**
+
+.git
+.venv
+**/__pycache__
+**/*.py[cod]
+.pytest_cache
+.ruff_cache
+.mypy_cache
+*.egg-info
+.vscode
+.idea

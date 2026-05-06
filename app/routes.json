@@ -1,0 +1,104 @@
+[
+  {
+    "task_name": "sorting_packages",
+    "config": "acot_icra_simulation_challenge_reasoning_to_action",
+    "dir": "./checkpoints/sorting_clean_7500_new",
+    "tricks": [
+      "sorting_packages_prompt"
+    ]
+  },
+  {
+    "task_name": "sorting_packages_continuous",
+    "config": "acot_icra_simulation_challenge_reasoning_to_action",
+    "dir": "./checkpoints/sorting_clean_60000",
+    "tricks": [
+      "sorting_packages_continuous_prompt",
+      "rule_based_sorting_correction"
+    ],
+    "sorting_corrections": [
+      1,
+      3,
+      4,
+      5
+    ]
+  },
+  {
+    "task_name": "sorting_packages_real",
+    "config": "acot_icra_simulation_challenge_reasoning_to_action",
+    "dir": "./checkpoints/sorting_clean_60000",
+    "tricks": [
+      "sorting_packages_continuous_prompt",
+      "rule_based_sorting_correction"
+    ],
+    "sorting_corrections": [
+      1,
+      3,
+      4,
+      5
+    ]
+  },
+  {
+    "task_name": "scoop_popcorn",
+    "config": "acot_icra_simulation_challenge_reasoning_to_action",
+    "dir": "./checkpoints/roll_v3_47999",
+    "tricks": []
+  },
+  {
+    "task_name": "pour_workpiece",
+    "config": "acot_icra_simulation_challenge_reasoning_to_action",
+    "dir": "./checkpoints/roll_v3_47999",
+    "tricks": []
+  },
+  {
+    "task_name": "place_block_into_box",
+    "config": "acot_icra_simulation_challenge_reasoning_to_action",
+    "dir": "./checkpoints/roll_v3_47999",
+    "tricks": []
+  },
+  {
+    "task_name": "stock_and_straighten_shelf",
+    "config": "acot_icra_simulation_challenge_reasoning_to_action",
+    "dir": "./checkpoints/roll_v3_47999",
+    "tricks": []
+  },
+  {
+    "task_name": "stock_and_straighten_shelf_real",
+    "config": "acot_icra_simulation_challenge_reasoning_to_action",
+    "dir": "./checkpoints/roll_v3_47999",
+    "tricks": []
+  },
+  {
+    "task_name": "hold_pot",
+    "config": "acot_icra_simulation_challenge_reasoning_to_action",
+    "dir": "./checkpoints/roll_v3_47999",
+    "tricks": []
+  },
+  {
+    "task_name": "clean_the_desktop",
+    "config": "acot_icra_simulation_challenge_reasoning_to_action",
+    "dir": "./checkpoints/sorting_clean_7500_new",
+    "tricks": [
+      "rule_based_clean_the_desktop_correction"
+    ]
+  },
+  {
+    "task_name": "clean_the_desktop_real",
+    "config": "acot_icra_simulation_challenge_reasoning_to_action",
+    "dir": "./checkpoints/sorting_clean_7500_new",
+    "tricks": [
+      "rule_based_clean_the_desktop_correction"
+    ]
+  },
+  {
+    "task_name": "take_wrong_item_shelf",
+    "config": "acot_icra_simulation_challenge_reasoning_to_action",
+    "dir": "./checkpoints/roll_v3_47999",
+    "tricks": []
+  },
+  {
+    "task_name": "open_door",
+    "config": "acot_icra_simulation_challenge_reasoning_to_action",
+    "dir": "./checkpoints/roll_v3_47999",
+    "tricks": []
+  }
+]

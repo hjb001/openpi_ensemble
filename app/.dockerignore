@@ -1,0 +1,20 @@
+# Ignore all checkpoints by default.
+checkpoints/**
+# Re-include the two checkpoints we need (per routes_junbo.json; h3-continue-44999-roll is also the default fallback).
+!checkpoints/
+!checkpoints/sorting_clean_7500_new/
+!checkpoints/sorting_clean_7500_new/**
+!checkpoints/h3-continue-44999-roll/
+!checkpoints/h3-continue-44999-roll/**
+!checkpoints/routes_junbo.json
+
+.git
+.venv
+**/__pycache__
+**/*.py[cod]
+.pytest_cache
+.ruff_cache
+.mypy_cache
+*.egg-info
+.vscode
+.idea

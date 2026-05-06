@@ -1,0 +1,55 @@
+# Task-routed ensemble（lazy）：LRU 最多保留 max_loaded_checkpoints 个 GPU 模型；协议与 serve_policy.py 一致。
+# 构建上下文必须是本目录（含 checkpoints、uv.lock、packages 等）：
+#   cd /data/openpi_app_yifei/app
+#   docker build -f Dockerfile.ensemble-lazy -t openpi-g2sim:ensemble-lazy .
+# 运行（需 NVIDIA GPU）：
+#   docker run --gpus all -p 8999:8999 openpi-g2sim:ensemble-lazy
+FROM nvidia/cuda:12.3.2-cudnn9-runtime-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    UV_LINK_MODE=copy \
+    UV_PROJECT_ENVIRONMENT=/app/.venv \
+    OPENPI_DATA_HOME=/app/.cache/openpi \
+    XLA_FLAGS=--xla_gpu_enable_triton_gemm=false \
+    MPLBACKEND=Agg
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    software-properties-common \
+    && add-apt-repository -y ppa:deadsnakes/ppa \
+    && apt-get update && apt-get install -y --no-install-recommends \
+    python3.11 \
+    python3.11-dev \
+    python3.11-venv \
+    curl \
+    ca-certificates \
+    git \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN ln -sf /usr/bin/python3.11 /usr/local/bin/python \
+    && ln -sf /usr/bin/python3.11 /usr/local/bin/python3
+
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+
+WORKDIR /app
+
+COPY . .
+
+RUN mkdir -p /app/.cache/openpi \
+    && uv sync --frozen --no-dev \
+    && uv pip install "matplotlib>=3.10.0"
+
+EXPOSE 8999
+
+# 等价于：uv run scripts/serve_policy_lazy.py --port 8999 policy:task-routed-ensemble-lazy ...
+CMD [ \
+    "/app/.venv/bin/python", \
+    "scripts/serve_policy_lazy.py", \
+    "--env", "G2SIM", \
+    "--port", "8999", \
+    "policy:task-routed-ensemble-lazy", \
+    "--policy.max-loaded-checkpoints", "2", \
+    "--policy.routes-json", "./checkpoints/routes.json", \
+    "--policy.default.config", "acot_icra_simulation_challenge_reasoning_to_action", \
+    "--policy.default.dir", "./checkpoints/h3-continues-10000" \
+]
