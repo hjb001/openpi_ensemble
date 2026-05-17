@@ -1,0 +1,50 @@
+# AgiBot G2 real-hardware client — launch commands per task.
+#
+# Prereqs (run every new shell):
+#   source ~/.cache/agibot/app/env.sh        # makes `agibot_gdk` importable
+#   cd /Users/huangjunbo/Downloads/openpi_ensemble/app
+#
+# The server (started separately on the GPU host) must already be running, e.g.:
+#   bash scripts/server_real.sh 0 8999
+
+
+# ─────────────────────────────────────────────────────────────
+# 1. Clean Desktop          (route → ./checkpoints/desktop_sanitized_10000)
+#    dataset task ids: task_7186, task_8308
+# ─────────────────────────────────────────────────────────────
+# Variant A — "Clean desktop"
+bash examples/agibot_real/client.sh clean_the_desktop_real 127.0.0.1 8999 "Clean desktop"
+
+# Variant B — "Clean Desktop 2"
+bash examples/agibot_real/client.sh clean_the_desktop_real 127.0.0.1 8999 "Clean Desktop 2"
+
+
+# ─────────────────────────────────────────────────────────────
+# 2. Restock Shelf          (route → ./checkpoints/real_base)
+#    dataset task id: task_7187
+# ─────────────────────────────────────────────────────────────
+bash examples/agibot_real/client.sh stock_and_straighten_shelf_real 127.0.0.1 8999 "Restock and organize the shelf."
+
+
+# ─────────────────────────────────────────────────────────────
+# 3. Scoop Popcorn          (route → ./checkpoints/real_base)
+#    dataset task id: task_7361
+# ─────────────────────────────────────────────────────────────
+bash examples/agibot_real/client.sh scoop_popcorn_real 127.0.0.1 8999 "Scoop popcorn 1"
+
+
+# ─────────────────────────────────────────────────────────────
+# 4. Sort Packages          (route → ./checkpoints/real_base, with sorting_packages_continuous_prompt trick)
+#    dataset task ids: task_7742, task_8343
+#
+#    NOTE: the server-side SortingStateMachine rewrites the prompt
+#    phase-by-phase (grab → turn_scan → ... → return). The string you pass
+#    here is only used to extract a colour token (black/white/red/yellow);
+#    "Sort packages" has no colour, so no colour token is injected (this is
+#    fine — GRAB_COLOR_CYCLE is all-None by default).
+# ─────────────────────────────────────────────────────────────
+# Variant A — "Sort packages"
+bash examples/agibot_real/client.sh sorting_packages_real 127.0.0.1 8999 "Sort packages"
+
+# Variant B — "Sort Packages 2"
+bash examples/agibot_real/client.sh sorting_packages_real 127.0.0.1 8999 "Sort Packages 2"

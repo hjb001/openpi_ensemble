@@ -1,287 +1,261 @@
-"""Agibot G02 real-robot environment adapter for the openpi WS client runtime.
+"""AgiBot G2 real-hardware environment for the openpi-acot stack.
 
-Wraps `agibot_gdk` (Python bindings for GDK v2.6.3.1) into the
-`openpi_client.runtime.environment.Environment` contract. The packed
-observation matches what the server-side `Go2ACOTInputs` /
-`LerobotACOTGo2DataConfig` expects under `EnvMode.G2SIM`, so the existing
-`scripts/serve_policy.py --env=g2sim` server consumes it without any change.
+Layout follows the ``acot_agibot_real`` train config (LerobotACOTGo2DataConfig +
+Go2ACOTInputs/Outputs):
 
-Pure I/O. No threads. Control rate is whatever the runtime drives us at; GDK
-does the per-joint interpolation in `joint_servo_control`. If real-robot
-trials show jitter, upgrade to a 100 Hz repeater thread (separate change).
+  state  (21 dims) = arm_joints(14: L7+R7) + effectors(2: L+R) + waist(5)
+  action (21 dims) = same layout — server returns 21-D chunks per step.
+
+Cameras returned to the policy use the Go2 dataset names:
+  ``top_head`` (= AgiBot ``head`` color), ``hand_left``, ``hand_right``.
+
+The policy ``prompt`` and ``task`` are *not* derived from the robot — set them
+on the environment via ``set_prompt`` / ``set_task`` (or pass at construction).
 """
-
-from __future__ import annotations
 
 import logging
 import time
-from typing import TYPE_CHECKING, Any
+from io import BytesIO
+from typing import List, Optional  # noqa: UP035
 
-import einops
+import agibot_gdk
 import numpy as np
-from openpi_client import image_tools
 from openpi_client.runtime import environment as _environment
+from PIL import Image
 from typing_extensions import override
 
-from . import constants
-
-if TYPE_CHECKING:  # only for type hints — the real module is imported lazily
-    import agibot_gdk
-
-log = logging.getLogger(__name__)
+_log = logging.getLogger(__name__)
 
 
-class CameraTimeout(RuntimeError):
-    """Raised when a single camera fails to deliver a frame within tolerance."""
+# Output layout produced by the policy (Go2ACOTOutputs slices to 21 dims).
+ARM_JOINTS_PER_SIDE = 7
+NUM_ARM_JOINTS = 2 * ARM_JOINTS_PER_SIDE  # 14
+NUM_EFFECTORS = 2
+NUM_WAIST_JOINTS = 5
+ACTION_DIM = NUM_ARM_JOINTS + NUM_EFFECTORS + NUM_WAIST_JOINTS  # 21
+
+# Slice indices into the 21-D vector.
+LEFT_ARM = slice(0, 7)
+RIGHT_ARM = slice(7, 14)
+LEFT_EFF = slice(14, 15)
+RIGHT_EFF = slice(15, 16)
+WAIST = slice(16, 21)
+
+# Dataset/policy camera key → AgiBot GDK image key.
+CAMERA_RENAME = {
+    "top_head": "head",
+    "hand_left": "hand_left",
+    "hand_right": "hand_right",
+}
+
+
+def _decode_color(image_info: dict) -> np.ndarray:
+    """Decode a JPEG returned by Env.get_observation into uint8 H,W,3 RGB."""
+    encoding = image_info["encoding"]
+    if encoding != "JPEG":
+        raise ValueError(f"Expected JPEG color image, got encoding={encoding!r}")
+    raw = image_info["image_data"]
+    if not isinstance(raw, (bytes, bytearray)):
+        raw = bytes(raw)
+    img = np.asarray(Image.open(BytesIO(raw)).convert("RGB"), dtype=np.uint8)
+
+    return img
+
+
+def _to_list_of_lists(values) -> List[List[float]]:  # noqa: UP006
+    arr = np.asarray(values, dtype=np.float64)
+    if arr.ndim == 1:
+        arr = arr[None, :]
+    if arr.ndim != 2:
+        raise ValueError(f"Expected 1D or 2D values, got shape {arr.shape}")
+    return [[float(x) for x in row] for row in arr]
+
 
 
 class AgibotRealEnvironment(_environment.Environment):
-    """Drives a physical Agibot G02 via GDK Python.
-
-    Args:
-        prompt: task description string sent with every observation.
-        gdk: the `agibot_gdk` module (real one in production, fake in tests).
-            Inject it so unit tests can run without a robot.
-        render_hw: target (H, W) for resized camera frames. Server training
-            used 224×224.
-        reset_pose: optional 16-dim list (left arm 7 + right arm 7 + grippers 2)
-            applied at `reset()`. None means do nothing on reset.
-        image_timeout_ms: per-camera deadline for `get_latest_image`.
-        speed_scale: in (0, 1]; scales the delta between current pose and
-            commanded pose. <1 is for cautious first-time deployment.
-        dry_run: if True, skip `joint_servo_control` calls (for staging).
-    """
+    """Real-world AgiBot G2 env for the ``acot_agibot_real`` policy."""
 
     def __init__(
         self,
-        *,
-        prompt: str,
-        gdk: Any,
-        render_hw: tuple[int, int] = constants.TARGET_HW,
-        reset_pose: list[float] | None = None,
-        image_timeout_ms: float = 200.0,
-        speed_scale: float = 1.0,
-        dry_run: bool = False,
+        prompt: str = "",
+        task_name: str = "",
+        camera_types: Optional[List["agibot_gdk.CameraType"]] = None,  # noqa: UP006,UP007
+        trajectory_reference_time: float = 1.0,
+        init_wait_seconds: float = 2.0,
+        gdk_init: bool = True,
     ) -> None:
-        if not 0.0 < speed_scale <= 1.0:
-            raise ValueError(f"speed_scale must be in (0, 1], got {speed_scale}")
-
         self._prompt = prompt
-        self._gdk = gdk
-        self._render_h, self._render_w = render_hw
-        self._image_timeout_ms = image_timeout_ms
-        self._speed_scale = speed_scale
-        self._dry_run = dry_run
-        self._reset_pose = reset_pose
+        # NOTE: field name is `task_name` (read by Policy.post_process) — NOT
+        # `task`, which would trigger Go2ACOTInputs.random_inject_prompt's
+        # training branch and require episode_index. They are different things.
+        self._task_name = task_name
+        self._trajectory_reference_time = trajectory_reference_time
+        self._owns_gdk = gdk_init
 
-        # Resolve CameraType enum values from the injected module. Doing this
-        # lazily means tests can use a fake module with the same attribute
-        # surface but different semantics.
-        self._cam_types: dict[str, Any] = {
-            key: getattr(gdk.CameraType, attr)
-            for key, attr in constants.CAMERA_TYPES.items()
-        }
+        if gdk_init:
+            res = agibot_gdk.gdk_init()
+            if res != agibot_gdk.GDKRes.kSuccess:
+                raise RuntimeError(f"GDK init failed: {res}")
 
-        if gdk.gdk_init() != gdk.GDKRes.kSuccess:
-            raise RuntimeError("gdk_init failed; check 10.42.1.101 connectivity")
+        if camera_types:
+            self._env = agibot_gdk.Env(camera_types=camera_types)
+        else:
+            self._env = agibot_gdk.Env(
+                camera_types=[
+                    agibot_gdk.CameraType.kHeadColor,
+                    agibot_gdk.CameraType.kHandLeftColor,
+                    agibot_gdk.CameraType.kHandRightColor,
+                ]
+            )
 
-        self._robot = gdk.Robot()
-        self._camera = gdk.Camera(list(self._cam_types.values()))
-        # GDK docs recommend sleeping ~2-3s for hardware to settle.
-        time.sleep(2.0)
+        # Robot instance for diagnostic state reads (not for control)
+        self._robot = agibot_gdk.Robot()
 
-        self._check_estop()
-        self._warn_if_unexpected_gripper()
+        time.sleep(init_wait_seconds)
 
-    # ------------------------------------------------------------------
-    # Environment interface
+        self._last_obs: Optional[dict] = None  # noqa: UP007
 
+    # ----- user-supplied inference inputs -----------------------------------
+    def set_prompt(self, prompt: str) -> None:
+        self._prompt = prompt
+
+    def set_task_name(self, task_name: str) -> None:
+        self._task_name = task_name
+
+    @property
+    def prompt(self) -> str:
+        return self._prompt
+
+    @property
+    def task_name(self) -> str:
+        return self._task_name
+
+    # ----- lifecycle --------------------------------------------------------
+    def close(self) -> None:
+        if self._owns_gdk:
+            agibot_gdk.gdk_release()
+            self._owns_gdk = False
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
+
+    # ----- Environment ABC --------------------------------------------------
     @override
     def reset(self) -> None:
-        if self._reset_pose is None:
-            log.info("reset(): no reset_pose configured, skipping")
-            return
-        if len(self._reset_pose) != len(constants.ACTION_LAYOUT):
-            raise ValueError(
-                f"reset_pose length {len(self._reset_pose)} != "
-                f"ACTION_LAYOUT length {len(constants.ACTION_LAYOUT)}"
-            )
-        log.info("reset(): moving to reset_pose")
-        # Use planning move (joint_control_request) — slower but safer than
-        # servo for the initial positioning.
-        req = self._gdk.JointControlReq()
-        req.joint_names = list(constants.ACTION_LAYOUT)
-        req.joint_positions = list(self._reset_pose)
-        req.joint_velocities = [0.3] * len(self._reset_pose)
-        req.life_time = 8.0
-        req.detail = "agibot_real reset"
-        if not self._dry_run:
-            self._robot.joint_control_request(req)
+        # GDK has no software reset; making this a no-op avoids a blocking
+        # get_observation that would deadlock if the cameras / DDS topics
+        # haven't fully published yet.
+        return
 
     @override
     def is_episode_complete(self) -> bool:
-        # Real robot has no env-driven termination; rely on max_episode_steps
-        # or external SIGINT.
         return False
 
     @override
     def get_observation(self) -> dict:
-        images = {
-            key: self._grab_image(cam_type)
-            for key, cam_type in self._cam_types.items()
-        }
-        state = self._pack_state(
-            self._robot.get_joint_states(),
-            self._robot.get_end_state(),
-        )
-        return {
+        t0 = time.perf_counter()
+        raw = self._env.get_observation(include_images=True)
+        t1 = time.perf_counter()
+        _log.info("GDK get_observation done in %.1f ms", (t1 - t0) * 1000)
+        self._last_obs = raw
+
+        states = raw["states"]
+        arm_q = np.asarray(states["arm_joint_states"], dtype=np.float32)
+        eff_q = np.asarray(states["effector_states"], dtype=np.float32)
+        waist_q = np.asarray(states["waist_joint_states"], dtype=np.float32)
+        if arm_q.shape[0] != NUM_ARM_JOINTS:
+            raise RuntimeError(f"arm_joint_states has {arm_q.shape[0]} dims, expected {NUM_ARM_JOINTS}")
+        if eff_q.shape[0] != NUM_EFFECTORS:
+            raise RuntimeError(f"effector_states has {eff_q.shape[0]} dims, expected {NUM_EFFECTORS}")
+        if waist_q.shape[0] != NUM_WAIST_JOINTS:
+            raise RuntimeError(f"waist_joint_states has {waist_q.shape[0]} dims, expected {NUM_WAIST_JOINTS}")
+        state_vec = np.concatenate([arm_q, eff_q, waist_q], dtype=np.float32)
+
+        # Send raw uint8 HWC frames; the server-side ModelTransformFactory
+        # handles resize/normalization. Hard-fail on a missing camera so we
+        # don't silently drift from training-time inputs.
+        raw_images = raw.get("images") or {}
+        images: dict = {}
+        for policy_name, gdk_name in CAMERA_RENAME.items():
+            entry = raw_images.get(gdk_name)
+            if entry is None or not entry.get("image_data"):
+                raise RuntimeError(f"Missing camera {gdk_name!r} in Env observation")
+            images[policy_name] = _decode_color(entry)
+
+        # `task_name` is consumed by Policy.post_process (waist policy):
+        #   * unset                          → return full 21-D action
+        #   * "sorting_packages"[_continuous] → freeze waist[0:4] to state, use waist[4]
+        #   * any other string               → truncate action to 16-D (drop waist)
+        # `task` (different field!) would trigger Go2ACOTInputs' training-time
+        # random_inject_prompt path, so we never set it.
+        out = {
+            "state": state_vec,
             "images": images,
-            "state": state,
             "prompt": self._prompt,
         }
+        if self._task_name:
+            out["task_name"] = self._task_name
+
+        return out
+
+
+    def execute_chunk(
+        self,
+        actions: np.ndarray,
+        trajectory_reference_time: Optional[float] = None,  # noqa: UP007
+    ) -> None:
+        """Send a full ``[T, action_dim]`` chunk to ``execute_trajectory``.
+
+        ``execute_trajectory`` is async — calling it again overrides the
+        previous trajectory. So we ship the whole chunk as ONE call (chunk
+        size = T, total duration = trajectory_reference_time) and let the
+        controller execute it before we re-plan.
+
+        ``action_dim`` must be 21 (arm14+eff2+waist5) or 16 (arm14+eff2,
+        waist dropped — server returns this when post_process truncates).
+        """
+        arr = np.asarray(actions, dtype=np.float64)
+
+        if arr.ndim == 1:
+            arr = arr[None, :]
+        if arr.ndim != 2 or arr.shape[-1] not in (16, ACTION_DIM):
+            raise ValueError(
+                f"Expected actions of shape [chunk, 16] or [chunk, {ACTION_DIM}]; got {arr.shape}"
+            )
+
+        trt = float(
+            trajectory_reference_time
+            if trajectory_reference_time is not None
+            else self._trajectory_reference_time
+        )
+
+        traj = {
+            "timestamps": time.time_ns(),
+            "trajectory_reference_time": trt,
+            "left_arm": {"kind": "JOINT_ABS", "values": _to_list_of_lists(arr[:, LEFT_ARM])},
+            "right_arm": {"kind": "JOINT_ABS", "values": _to_list_of_lists(arr[:, RIGHT_ARM])},
+            "left_effector": _to_list_of_lists(arr[:, LEFT_EFF]),
+            "right_effector": _to_list_of_lists(arr[:, RIGHT_EFF]),
+        }
+
+        if arr.shape[-1] == ACTION_DIM:
+            traj["waist"] = {"kind": "JOINT_ABS", "values": _to_list_of_lists(arr[:, WAIST])}
+
+        self._env.execute_trajectory(traj)
+
 
     @override
     def apply_action(self, action: dict) -> None:
-        # The server returns a chunk; ActionChunkBroker hands us a single step.
-        # Either {"actions": ndarray[D]} or just ndarray[D] depending on broker.
-        a = action["actions"] if isinstance(action, dict) else action
-        a = np.asarray(a, dtype=np.float32)
-        if a.ndim != 1:
-            raise ValueError(f"expected 1-D action, got shape {a.shape}")
+        """openpi-runtime Environment hook.
 
-        joint_names = list(constants.ACTION_LAYOUT)
-        if a.shape[0] < len(joint_names):
-            raise ValueError(
-                f"action has {a.shape[0]} dims, need at least {len(joint_names)}"
-            )
-        target = a[: len(joint_names)].astype(np.float64).tolist()
-
-        if self._speed_scale < 1.0:
-            current = self._read_layout_positions(
-                joint_names, self._robot.get_joint_states(), self._robot.get_end_state()
-            )
-            target = [c + self._speed_scale * (t - c) for c, t in zip(current, target)]
-
-        target = self._clamp_action(joint_names, target)
-
-        if not np.all(np.isfinite(target)):
-            raise ValueError("action contained non-finite values; aborting")
-
-        if self._dry_run:
-            log.info("[dry-run] would send: %s", list(zip(joint_names, target))[:4])
-            return
-
-        req = self._gdk.JointServoControlReq()
-        req.control_period = 0.05  # 50 ms; loop runs ~30 Hz, give some slack
-        req.joint_names = joint_names
-        req.joint_positions = target
-        self._robot.joint_servo_control(req)
-
-    # ------------------------------------------------------------------
-    # Helpers (also re-used by unit tests)
-
-    def _grab_image(self, cam_type: Any) -> np.ndarray:
-        img = self._camera.get_latest_image(cam_type, self._image_timeout_ms)
-        if img is None:
-            raise CameraTimeout(f"no frame from camera {cam_type} within {self._image_timeout_ms} ms")
-        return self._image_to_chw(img, self._render_h, self._render_w)
-
-    @staticmethod
-    def _image_to_chw(img: Any, target_h: int, target_w: int) -> np.ndarray:
-        """Convert a GDK Image (or compatible duck-type) to CHW uint8."""
-        encoding = (img.encoding or "").lower()
-        if encoding not in {"rgb8", "bgr8"}:
-            raise ValueError(f"unsupported image encoding {encoding!r}")
-        arr = np.frombuffer(img.data, dtype=np.uint8).reshape(img.height, img.width, 3)
-        if encoding == "bgr8":
-            arr = arr[:, :, ::-1]
-        arr = image_tools.convert_to_uint8(image_tools.resize_with_pad(arr, target_h, target_w))
-        return einops.rearrange(arr, "h w c -> c h w")
-
-    @staticmethod
-    def _pack_state(joint_states: dict, end_state: dict) -> np.ndarray:
-        positions = AgibotRealEnvironment._read_layout_positions(
-            list(constants.STATE_LAYOUT), joint_states, end_state
-        )
-        out = np.zeros(constants.STATE_DIM, dtype=np.float32)
-        out[: len(positions)] = positions
-        return out
-
-    @staticmethod
-    def _read_layout_positions(
-        layout: list[str],
-        joint_states: dict,
-        end_state: dict,
-    ) -> list[float]:
-        """Pull positions in `layout` order from GDK responses.
-
-        joint_states comes from `Robot.get_joint_states()`; end_state from
-        `Robot.get_end_state()`. We try the body/arm/head joints first, then
-        fall back to end_state for end-effector joints (grippers / dexterous
-        hands).
+        DO NOT pair this with ``ActionChunkBroker`` — the broker emits one
+        action per step (chunk_size=1) and the async ``execute_trajectory``
+        will override every previous call before motion completes, so the
+        robot won't move. Use ``execute_chunk`` from a custom loop that
+        sends the full chunk in one shot.
         """
-        body_pos = {s["name"]: float(s["motor_position"]) for s in joint_states.get("states", [])}
-        ee_pos: dict[str, float] = {}
-        for side_key in ("left_end_state", "right_end_state"):
-            side = end_state.get(side_key, {}) or {}
-            for name, st in zip(side.get("names", []), side.get("end_states", [])):
-                ee_pos[name] = float(st["position"])
-
-        out: list[float] = []
-        missing: list[str] = []
-        for name in layout:
-            if name in body_pos:
-                out.append(body_pos[name])
-            elif name in ee_pos:
-                out.append(ee_pos[name])
-            else:
-                missing.append(name)
-                out.append(0.0)
-        if missing:
-            log.warning("joints missing from GDK response, using 0.0: %s", missing)
-        return out
-
-    @staticmethod
-    def _clamp_action(joint_names: list[str], target: list[float]) -> list[float]:
-        out: list[float] = []
-        for name, value in zip(joint_names, target):
-            lo, hi = constants.JOINT_LIMITS.get(name, (-np.inf, np.inf))
-            v = float(np.clip(value, lo, hi))
-            out.append(v)
-        return out
-
-    def _check_estop(self) -> None:
-        status = self._robot.get_whole_body_status()
-        if status.get("right_arm_estop") or status.get("left_arm_estop"):
-            raise RuntimeError("e-stop is engaged; release it before starting client")
-
-    def _warn_if_unexpected_gripper(self) -> None:
-        try:
-            end_state = self._robot.get_end_state()
-            for side in ("left_end_state", "right_end_state"):
-                names = (end_state.get(side, {}) or {}).get("names", [])
-                if names and not any("gripper" in n for n in names):
-                    log.warning(
-                        "%s reports non-gripper joints %s; constants.JOINT_LIMITS "
-                        "are tuned for omnipicker, action clamps may be wrong",
-                        side, names,
-                    )
-        except Exception:  # noqa: BLE001
-            log.warning("could not query end-effector type", exc_info=True)
-
-    def close(self) -> None:
-        try:
-            self._camera.close_camera()
-        except Exception:  # noqa: BLE001
-            log.exception("camera close_camera failed")
-        try:
-            self._gdk.gdk_release()
-        except Exception:  # noqa: BLE001
-            log.exception("gdk_release failed")
-
-    def __del__(self) -> None:
-        # Best-effort cleanup; users should call close() explicitly.
-        try:
-            self.close()
-        except Exception:  # noqa: BLE001
-            pass
+        actions = action["actions"] if isinstance(action, dict) else action
+        self.execute_chunk(actions)

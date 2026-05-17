@@ -289,7 +289,7 @@ class Policy(BasePolicy):
             raw_state = jax.tree.map(lambda x: x, obs).get("state", None)
             assert raw_state is not None, "State is required for post-processing waist actions"
             # freeze four waist actions to the current state, utilizing only the last action for policy output
-            outputs["actions"][:, 16:20] = raw_state[16:20]
+            #outputs["actions"][:, 16:20] = raw_state[16:20]
 
         return outputs
 
